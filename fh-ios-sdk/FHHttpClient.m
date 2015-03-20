@@ -6,9 +6,7 @@
 //
 
 #import "FHHttpClient.h"
-#import "ASIFormDataRequest.h"
 #import "FHResponse.h"
-#import "ASIDownloadCache.h"
 #import "FH.h"
 #import "FHConfig.h"
 #import "FHJSON.h"
@@ -33,6 +31,7 @@
         failureHandler = [failornil copy];
     }
 #endif
+
     if (![FH isOnline]) {
         FHResponse *res = [[FHResponse alloc] init];
         [res setError:[NSError errorWithDomain:@"FHHttpClient"
@@ -48,81 +47,113 @@
     NSLog(@"Request URL is : %@", [apicall absoluteString]);
 #endif
     // startrequest
-    __block ASIHTTPRequest *brequest = [ASIHTTPRequest requestWithURL:apicall];
-    __weak ASIHTTPRequest *request = brequest;
+    NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:apicall];
 
-    // set headers
+    // set up headers
     NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithDictionary:fhact.headers];
     NSString *apiKeyVal = [[FHConfig getSharedInstance] getConfigValueForKey:@"appkey"];
     [headers setValue:@"application/json" forKey:@"Content-Type"];
     [headers setValue:apiKeyVal forKeyPath:@"x-fh-auth-app"];
-    [brequest setRequestHeaders:headers];
-    // add params to the post request
+    // apply them
+    request.allHTTPHeaderFields = headers;
+
+    // add (any) params to the post request
     if ([fhact args] && [[fhact args] count] > 0) {
-        [brequest appendPostData:[[fhact args] JSONData]];
+        request.HTTPBody = [[fhact args] JSONData];
     }
-    // setMethod
-    [brequest setRequestMethod:fhact.requestMethod];
-    [brequest setTimeOutSeconds:fhact.requestTimeout];
-    // wrap the passed block inside our own success block to allow for
-    // further manipulation
-    [brequest setCompletionBlock:^{
-#if DEBUG
-        NSLog(@"reused cache %c", [request didUseCachedResponse]);
-        NSLog(@"Response status : %d", [request responseStatusCode]);
-        NSLog(@"Response data : %@", [request responseString]);
-#endif
-        // parse, build response, delegate
-        NSData *responseData = [request responseData];
-        FHResponse *fhResponse = [[FHResponse alloc] init];
-        fhResponse.responseStatusCode = [request responseStatusCode];
-        fhResponse.rawResponseAsString = [request responseString];
-        fhResponse.rawResponse = responseData;
-        [fhResponse parseResponseData:responseData];
 
-        if ([request responseStatusCode] == 200) {
-            NSString *status = [fhResponse.parsedResponse valueForKey:@"status"];
-            if ((nil == status) || (nil != status)) {
-                [self successWithResponse:fhResponse AndAction:fhact];
-                return;
-            }
+    request.HTTPMethod = fhact.requestMethod;
+    request.timeoutInterval = fhact.requestTimeout;
+
+    // define common response handling block invoked in both async and sync variant methods
+    void (^completionHandler)(NSURLResponse *, NSData *, NSError *);
+
+    completionHandler = ^(NSURLResponse *response, NSData *data, NSError *error) {
+        // wrap in an NSHTTPURLResponse to extract status code
+        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+        NSInteger statusCode = httpResponse.statusCode;
+
+        // extract response data (if any)
+        NSString *responseString;
+        if (data && data.length > 0) {
+            responseString = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
         }
-        NSString *msg = [fhResponse.parsedResponse valueForKey:@"msg"];
-        if (nil == msg) {
-            msg = [fhResponse.parsedResponse valueForKey:@"message"];
+
+        // initialize response object passed in both success/failure blocks
+        FHResponse *fhResponse = [[FHResponse alloc] init];
+        fhResponse.responseStatusCode = statusCode;
+        fhResponse.rawResponseAsString = responseString;
+        fhResponse.rawResponse = data;
+        [fhResponse parseResponseData:data];
+
+        // if a foundation networking error occured
+        if (error) {
+            fhResponse.error = error;
+
+            // invoke fail callback
+            [self failWithResponse:fhResponse AndAction:fhact];
+
+            // can't do much, simply return
+            return;
+        }
+        
+        // main FH response handling
+       
+        #if DEBUG
+            // NSLog(@"reused cache %c",[request didUseCachedResponse]);
+            NSLog(@"Response status : %ld", (long)statusCode); //
+            NSLog(@"Response data : %@", responseString);
+        #endif
+        
+        // if FH replied successfully
+        if (statusCode == 200) {
+            [self successWithResponse:fhResponse AndAction:fhact];
+
+        } else { // a FH error has occured
+            NSError *err;
+            // extract FH error message
+            NSString *msg = [fhResponse.parsedResponse valueForKey:@"msg"];
             if (nil == msg) {
-                msg = [request responseString];
+                msg = [fhResponse.parsedResponse valueForKey:@"message"];
+                if (nil == msg) {
+                    msg = responseString;
+                }
             }
+
+            // initialize error with message
+            err = [NSError errorWithDomain:NSURLErrorDomain code:statusCode
+                                  userInfo:@{NSLocalizedDescriptionKey : msg}];
+            // assign it to response
+            fhResponse.error = err;
+
+            // invoke fail callback
+            [self failWithResponse:fhResponse AndAction:fhact];
         }
-        NSError *err = [NSError errorWithDomain:NetworkRequestErrorDomain
-                                           code:[request responseStatusCode]
-                                       userInfo:@{NSLocalizedDescriptionKey : msg}];
-        fhResponse.error = err;
-        [self failWithResponse:fhResponse AndAction:fhact];
-    }];
-    // again wrap the fail block in our own block
-    [brequest setFailedBlock:^{
-        NSError *reqError = [request error];
-        NSData *responseData = [request responseData];
-        FHResponse *fhResponse = [[FHResponse alloc] init];
-        fhResponse.rawResponseAsString = [request responseString];
-        fhResponse.rawResponse = responseData;
-        fhResponse.error = reqError;
-        [self failWithResponse:fhResponse AndAction:fhact];
-    }];
+    };
 
-    if (fhact.cacheTimeout > 0) {
-        [[ASIDownloadCache sharedCache] setShouldRespectCacheControlHeaders:NO];
-        [brequest setDownloadCache:[ASIDownloadCache sharedCache]];
+    // time to invoke actual request..
+    
+    if ([fhact isAsync]) { // invoke asynchronous request
+        [NSURLConnection sendAsynchronousRequest:request queue:[NSOperationQueue mainQueue]
+                  completionHandler:^(NSURLResponse *response, NSData *data, NSError *error) {
+                        completionHandler(response, data, error);
+        }];
 
-        [brequest setSecondsToCache:fhact.cacheTimeout];
+    } else { // invoke synchronous request
+        NSURLResponse *response = nil; NSError *error = nil;
+        NSData *data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:&error];
+
+        completionHandler(response, data, error);
     }
 
-    if ([fhact isAsync]) {
-        [brequest startAsynchronous];
-    } else {
-        [brequest startSynchronous];
-    }
+    /*  TODO Cache removal
+  if(fhact.cacheTimeout > 0){
+    [[ASIDownloadCache sharedCache] setShouldRespectCacheControlHeaders:NO];
+    [brequest setDownloadCache:[ASIDownloadCache sharedCache]];
+
+    [brequest setSecondsToCache:fhact.cacheTimeout];
+  }
+   */
 }
 
 - (void)successWithResponse:(FHResponse *)fhres AndAction:(FHAct *)action {

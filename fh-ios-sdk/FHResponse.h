@@ -13,19 +13,19 @@
 @interface FHResponse : NSObject
 
 /** Get the raw response data */
-@property (nonatomic, strong) NSData *rawResponse;
+@property(nonatomic, strong) NSData *rawResponse;
 
 /** Get the raw response data as NSString */
-@property (nonatomic, strong) NSString *rawResponseAsString;
+@property(nonatomic, strong) NSString *rawResponseAsString;
 
 /** Get the response data as NSDictionary */
-@property (nonatomic, strong) NSDictionary *parsedResponse;
+@property(nonatomic, strong) NSDictionary *parsedResponse;
 
 /** Get the response's status code */
-@property (nonatomic, assign) int responseStatusCode;
+@property(nonatomic, assign) NSInteger responseStatusCode;
 
 /** Get the error of the response */
-@property (nonatomic, strong) NSError *error;
+@property(nonatomic, strong) NSError *error;
 
 /** Parse the response string (JSON format)
 
