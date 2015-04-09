@@ -26,3 +26,6 @@ dist/
 # Exclude the output of the 'pod package' directory when build.
 # The output is of the form 'FH-{VERSION}''
 FH-*/
+
+# Exclude demos FH.framework
+demos/*/FH.framework
